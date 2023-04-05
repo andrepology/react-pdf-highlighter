@@ -33,7 +33,7 @@ export class Tip extends Component<Props, State> {
   render() {
     const { onConfirm, onOpen } = this.props;
     const { compact, text, emoji } = this.state;
-
+    console.log("Tip.render");
     return (
       <div className="Tip">
         {compact ? (
