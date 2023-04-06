@@ -14,7 +14,7 @@ import {
   getPageFromElement,
   getPagesFromRange,
   getWindow,
-  isHTMLElement
+  isHTMLElement,
 } from "../lib/pdfjs-dom";
 import { scaledToViewport, viewportToScaled } from "../lib/coordinates";
 import MouseSelection from "./MouseSelection";
