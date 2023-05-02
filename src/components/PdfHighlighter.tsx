@@ -64,7 +64,7 @@ interface Props<T_HT> {
   pdfScaleValue: string;
   onSelectionFinished: (
     position: ScaledPosition,
-    content: { image: string; imageWithContext: string },
+    content: { text?: string; image?: string; imageWithContext?: string },
     hideTipAndSelection: () => void,
     transformSelection: () => void
   ) => JSX.Element | null;
@@ -672,7 +672,7 @@ export class PdfHighlighter<T_HT extends IHighlight> extends PureComponent<
   }
 }
 
-const clamp = (num, min, max) => num <= min
+const clamp = (num: number, min: number, max: number) => num <= min
   ? min
   : num >= max
     ? max
