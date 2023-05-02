@@ -14,13 +14,13 @@ import {
   getPageFromElement,
   getPagesFromRange,
   getWindow,
-  isHTMLElement,
+  isHTMLElement
 } from "../lib/pdfjs-dom";
 import { scaledToViewport, viewportToScaled } from "../lib/coordinates";
 import MouseSelection from "./MouseSelection";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import TipContainer from "./TipContainer";
-import getAreaAsPng from "../lib/get-area-as-png";
+import { getAreaAsPNG, getAreaAsPngWithContext } from "../lib/get-area-as-png";
 import getBoundingRect from "../lib/get-bounding-rect";
 import getClientRects from "../lib/get-client-rects";
 import { HighlightLayer } from "./HighlightLayer";
@@ -64,7 +64,7 @@ interface Props<T_HT> {
   pdfScaleValue: string;
   onSelectionFinished: (
     position: ScaledPosition,
-    content: { text?: string; image?: string },
+    content: { image: string; imageWithContext: string },
     hideTipAndSelection: () => void,
     transformSelection: () => void
   ) => JSX.Element | null;
@@ -289,10 +289,11 @@ export class PdfHighlighter<T_HT extends IHighlight> extends PureComponent<
     };
   }
 
-  screenshot(position: LTWH, pageNumber: number) {
+  screenshot(position: LTWH, pageNumber: number, contextPosition?: LTWH) {
     const canvas = this.viewer.getPageView(pageNumber - 1).canvas;
-
-    return getAreaAsPng(canvas, position);
+    return contextPosition == null
+      ? getAreaAsPNG(canvas, position)
+      : getAreaAsPngWithContext(canvas, position, contextPosition)
   }
 
   hideTipAndSelection = () => {
@@ -588,12 +589,25 @@ export class PdfHighlighter<T_HT extends IHighlight> extends PureComponent<
                   pageBoundingRect,
                   pageBoundingRect.pageNumber
                 );
+                const partialHeight = page.node.offsetHeight * 0.75;
+                const contextTop = clamp(pageBoundingRect.top - (partialHeight / 2), 0, page.node.offsetHeight * 0.25);
+                const imageWithContext = this.screenshot(
+                  { ...pageBoundingRect, top: pageBoundingRect.top - contextTop },
+                  pageBoundingRect.pageNumber,
+                  {
+                    ...pageBoundingRect,
+                    top: contextTop,
+                    left: page.node.clientLeft,
+                    width: page.node.offsetWidth,
+                    height: partialHeight,
+                  }
+                );
 
                 this.setTip(
                   viewportPosition,
                   onSelectionFinished(
                     scaledPosition,
-                    { image },
+                    { image, imageWithContext },
                     () => this.hideTipAndSelection(),
                     () => {
                       console.log("setting ghost highlight", scaledPosition);
@@ -657,3 +671,9 @@ export class PdfHighlighter<T_HT extends IHighlight> extends PureComponent<
     );
   }
 }
+
+const clamp = (num, min, max) => num <= min
+  ? min
+  : num >= max
+    ? max
+    : num;
