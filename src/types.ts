@@ -38,6 +38,7 @@ export interface ScaledPosition {
 export interface Content {
   text?: string;
   image?: string;
+  imageWithContext?: string;
 }
 
 export interface HighlightContent {

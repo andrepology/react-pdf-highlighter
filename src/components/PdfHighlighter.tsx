@@ -1,48 +1,31 @@
-import React, { PointerEventHandler, PureComponent } from "react";
-import ReactDom from "react-dom";
+import React, { PointerEventHandler, PureComponent, RefObject } from "react";
+import { createRoot, Root } from "react-dom/client";
 import debounce from "lodash.debounce";
 
-import {
-  EventBus,
-  PDFViewer,
-  PDFLinkService,
-  NullL10n,
-} from "pdfjs-dist/legacy/web/pdf_viewer";
+import { EventBus, NullL10n, PDFLinkService, PDFViewer } from "pdfjs-dist/legacy/web/pdf_viewer";
 
 import "pdfjs-dist/web/pdf_viewer.css";
 import "../style/pdf_viewer.css";
-
 import "../style/PdfHighlighter.css";
-
-import getBoundingRect from "../lib/get-bounding-rect";
-import getClientRects from "../lib/get-client-rects";
-import getAreaAsPng from "../lib/get-area-as-png";
-
+import type { IHighlight, LTWH, LTWHP, Position, Scaled, ScaledPosition } from "../types";
 import {
   asElement,
-  getPagesFromRange,
-  getPageFromElement,
-  getWindow,
   findOrCreateContainerLayer,
-  isHTMLElement,
+  getPageFromElement,
+  getPagesFromRange,
+  getWindow,
+  isHTMLElement
 } from "../lib/pdfjs-dom";
-
-import TipContainer from "./TipContainer";
-import MouseSelection from "./MouseSelection";
-
 import { scaledToViewport, viewportToScaled } from "../lib/coordinates";
-
-import type {
-  Position,
-  ScaledPosition,
-  IHighlight,
-  Scaled,
-  LTWH,
-  LTWHP,
-} from "../types";
+import MouseSelection from "./MouseSelection";
 import type { PDFDocumentProxy } from "pdfjs-dist";
+import TipContainer from "./TipContainer";
+import { getAreaAsPNG, getAreaAsPngWithContext } from "../lib/get-area-as-png";
+import getBoundingRect from "../lib/get-bounding-rect";
+import getClientRects from "../lib/get-client-rects";
+import { HighlightLayer } from "./HighlightLayer";
 
-type T_ViewportHighlight<T_HT> = { position: Position } & T_HT;
+export type T_ViewportHighlight<T_HT> = { position: Position } & T_HT;
 
 interface State<T_HT> {
   ghostHighlight: {
@@ -81,7 +64,7 @@ interface Props<T_HT> {
   pdfScaleValue: string;
   onSelectionFinished: (
     position: ScaledPosition,
-    content: { text?: string; image?: string },
+    content: { text?: string; image?: string; imageWithContext?: string },
     hideTipAndSelection: () => void,
     transformSelection: () => void
   ) => JSX.Element | null;
@@ -119,6 +102,8 @@ export class PdfHighlighter<T_HT extends IHighlight> extends PureComponent<
 
   resizeObserver: ResizeObserver | null = null;
   containerNode?: HTMLDivElement | null = null;
+  containerNodeRef: RefObject<HTMLDivElement>;
+  highlightReactRoots: { [page: number]: Root } = {};
   unsubscribe = () => {};
 
   constructor(props: Props<T_HT>) {
@@ -126,15 +111,16 @@ export class PdfHighlighter<T_HT extends IHighlight> extends PureComponent<
     if (typeof ResizeObserver !== "undefined") {
       this.resizeObserver = new ResizeObserver(this.debouncedScaleValue);
     }
+    this.containerNodeRef = React.createRef();
   }
 
   componentDidMount() {
     this.init();
   }
 
-  attachRef = (ref: HTMLDivElement | null) => {
+  attachRef = () => {
     const { eventBus, resizeObserver: observer } = this;
-    this.containerNode = ref;
+    const ref = (this.containerNode = this.containerNodeRef!.current);
     this.unsubscribe();
 
     if (ref) {
@@ -166,17 +152,18 @@ export class PdfHighlighter<T_HT extends IHighlight> extends PureComponent<
       return;
     }
     if (prevProps.highlights !== this.props.highlights) {
-      this.renderHighlights(this.props);
+      this.renderHighlightLayers();
     }
   }
 
   init() {
     const { pdfDocument } = this.props;
+    this.attachRef();
 
     this.viewer =
       this.viewer ||
       new PDFViewer({
-        container: this.containerNode!,
+        container: this.containerNodeRef!.current!,
         eventBus: this.eventBus,
         // enhanceTextSelection: true, // deprecated. https://github.com/mozilla/pdf.js/issues/9943#issuecomment-409369485
         textLayerMode: 2,
@@ -188,7 +175,6 @@ export class PdfHighlighter<T_HT extends IHighlight> extends PureComponent<
     this.linkService.setDocument(pdfDocument);
     this.linkService.setViewer(this.viewer);
     this.viewer.setDocument(pdfDocument);
-
     // debug
     (window as any).PdfViewer = this;
   }
@@ -303,70 +289,11 @@ export class PdfHighlighter<T_HT extends IHighlight> extends PureComponent<
     };
   }
 
-  screenshot(position: LTWH, pageNumber: number) {
+  screenshot(position: LTWH, pageNumber: number, contextPosition?: LTWH) {
     const canvas = this.viewer.getPageView(pageNumber - 1).canvas;
-
-    return getAreaAsPng(canvas, position);
-  }
-
-  renderHighlights(nextProps?: Props<T_HT>) {
-    const { highlightTransform, highlights } = nextProps || this.props;
-
-    const { pdfDocument } = this.props;
-
-    const { tip, scrolledToHighlightId } = this.state;
-
-    const highlightsByPage = this.groupHighlightsByPage(highlights);
-
-    for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber++) {
-      const highlightLayer = this.findOrCreateHighlightLayer(pageNumber);
-
-      if (highlightLayer) {
-        ReactDom.render(
-          <div>
-            {(highlightsByPage[String(pageNumber)] || []).map(
-              ({ position, id, ...highlight }, index) => {
-                // @ts-ignore
-                const viewportHighlight: T_ViewportHighlight<T_HT> = {
-                  id,
-                  position: this.scaledPositionToViewport(position),
-                  ...highlight,
-                };
-
-                if (tip && tip.highlight.id === String(id)) {
-                  this.showTip(tip.highlight, tip.callback(viewportHighlight));
-                }
-
-                const isScrolledTo = Boolean(scrolledToHighlightId === id);
-
-                return highlightTransform(
-                  viewportHighlight,
-                  index,
-                  (highlight, callback) => {
-                    this.setState({
-                      tip: { highlight, callback },
-                    });
-
-                    this.showTip(highlight, callback(highlight));
-                  },
-                  this.hideTipAndSelection,
-                  (rect) => {
-                    const viewport = this.viewer.getPageView(
-                      (rect.pageNumber || pageNumber) - 1
-                    ).viewport;
-
-                    return viewportToScaled(rect, viewport);
-                  },
-                  (boundingRect) => this.screenshot(boundingRect, pageNumber),
-                  isScrolledTo
-                );
-              }
-            )}
-          </div>,
-          highlightLayer
-        );
-      }
-    }
+    return contextPosition == null
+      ? getAreaAsPNG(canvas, position)
+      : getAreaAsPngWithContext(canvas, position, contextPosition)
   }
 
   hideTipAndSelection = () => {
@@ -376,7 +303,7 @@ export class PdfHighlighter<T_HT extends IHighlight> extends PureComponent<
     });
 
     this.setState({ ghostHighlight: null, tip: null }, () =>
-      this.renderHighlights()
+      this.renderHighlightLayers()
     );
   };
 
@@ -429,7 +356,8 @@ export class PdfHighlighter<T_HT extends IHighlight> extends PureComponent<
   };
 
   onTextLayerRendered = () => {
-    this.renderHighlights();
+    console.log("onTextLayerRendered");
+    this.renderHighlightLayers();
   };
 
   scrollTo = (highlight: T_HT) => {
@@ -459,7 +387,7 @@ export class PdfHighlighter<T_HT extends IHighlight> extends PureComponent<
       {
         scrolledToHighlightId: highlight.id,
       },
-      () => this.renderHighlights()
+      () => this.renderHighlightLayers()
     );
 
     // wait for scrolling to finish
@@ -477,6 +405,7 @@ export class PdfHighlighter<T_HT extends IHighlight> extends PureComponent<
   };
 
   onSelectionChange = () => {
+    console.log("onSelectionChange");
     const container = this.containerNode;
     const selection = getWindow(container).getSelection();
 
@@ -516,7 +445,7 @@ export class PdfHighlighter<T_HT extends IHighlight> extends PureComponent<
       {
         scrolledToHighlightId: EMPTY_ID,
       },
-      () => this.renderHighlights()
+      () => this.renderHighlightLayers()
     );
 
     this.viewer.container.removeEventListener("scroll", this.onScroll);
@@ -541,6 +470,7 @@ export class PdfHighlighter<T_HT extends IHighlight> extends PureComponent<
   };
 
   afterSelection = () => {
+    console.log("afterSelection");
     const { onSelectionFinished } = this.props;
 
     const { isCollapsed, range } = this.state;
@@ -585,7 +515,7 @@ export class PdfHighlighter<T_HT extends IHighlight> extends PureComponent<
             {
               ghostHighlight: { position: scaledPosition },
             },
-            () => this.renderHighlights()
+            () => this.renderHighlightLayers()
           )
       )
     );
@@ -614,7 +544,7 @@ export class PdfHighlighter<T_HT extends IHighlight> extends PureComponent<
     return (
       <div onPointerDown={this.onMouseDown}>
         <div
-          ref={this.attachRef}
+          ref={this.containerNodeRef}
           className="PdfHighlighter"
           onContextMenu={(e) => e.preventDefault()}
         >
@@ -659,14 +589,28 @@ export class PdfHighlighter<T_HT extends IHighlight> extends PureComponent<
                   pageBoundingRect,
                   pageBoundingRect.pageNumber
                 );
+                const partialHeight = page.node.offsetHeight * 0.75;
+                const contextTop = clamp(pageBoundingRect.top - (partialHeight / 2), 0, page.node.offsetHeight * 0.25);
+                const imageWithContext = this.screenshot(
+                  { ...pageBoundingRect, top: pageBoundingRect.top - contextTop },
+                  pageBoundingRect.pageNumber,
+                  {
+                    ...pageBoundingRect,
+                    top: contextTop,
+                    left: page.node.clientLeft,
+                    width: page.node.offsetWidth,
+                    height: partialHeight,
+                  }
+                );
 
                 this.setTip(
                   viewportPosition,
                   onSelectionFinished(
                     scaledPosition,
-                    { image },
+                    { image, imageWithContext },
                     () => this.hideTipAndSelection(),
-                    () =>
+                    () => {
+                      console.log("setting ghost highlight", scaledPosition);
                       this.setState(
                         {
                           ghostHighlight: {
@@ -676,9 +620,10 @@ export class PdfHighlighter<T_HT extends IHighlight> extends PureComponent<
                         },
                         () => {
                           resetSelection();
-                          this.renderHighlights();
+                          this.renderHighlightLayers();
                         }
-                      )
+                      );
+                    }
                   )
                 );
               }}
@@ -688,4 +633,47 @@ export class PdfHighlighter<T_HT extends IHighlight> extends PureComponent<
       </div>
     );
   }
+
+  private renderHighlightLayers() {
+    const { pdfDocument } = this.props;
+    for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber++) {
+      const root = this.highlightReactRoots[pageNumber];
+      if (root != null) {
+        this.renderHighlightLayer(root, pageNumber);
+      } else {
+        const highlightLayer = this.findOrCreateHighlightLayer(pageNumber);
+        if (highlightLayer) {
+          const root = createRoot(highlightLayer!);
+          this.highlightReactRoots[pageNumber] = root;
+          this.renderHighlightLayer(root, pageNumber);
+        }
+      }
+    }
+  }
+
+  private renderHighlightLayer(root: Root, pageNumber: number) {
+    const { highlightTransform, highlights } = this.props;
+    const { tip, scrolledToHighlightId } = this.state;
+    root.render(
+      <HighlightLayer
+        highlightsByPage={this.groupHighlightsByPage(highlights)}
+        pageNumber={pageNumber.toString()}
+        scrolledToHighlightId={scrolledToHighlightId}
+        highlightTransform={highlightTransform}
+        tip={tip}
+        scaledPositionToViewport={this.scaledPositionToViewport.bind(this)}
+        hideTipAndSelection={this.hideTipAndSelection.bind(this)}
+        viewer={this.viewer}
+        screenshot={this.screenshot.bind(this)}
+        showTip={this.showTip.bind(this)}
+        setState={this.setState.bind(this)}
+      />
+    );
+  }
 }
+
+const clamp = (num: number, min: number, max: number) => num <= min
+  ? min
+  : num >= max
+    ? max
+    : num;
